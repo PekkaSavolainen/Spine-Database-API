@@ -20,13 +20,12 @@ import hashlib
 import os
 import logging
 import time
-from collections import namedtuple
 from types import MethodType
 from sqlalchemy import create_engine, case, MetaData, Table, Column, false, and_, func
 from sqlalchemy.sql.expression import label, Alias
 from sqlalchemy.engine.url import make_url, URL
 from sqlalchemy.orm import Session, aliased
-from sqlalchemy.exc import DatabaseError, DBAPIError
+from sqlalchemy.exc import DatabaseError
 from alembic.migration import MigrationContext
 from alembic.environment import EnvironmentContext
 from alembic.script import ScriptDirectory
@@ -681,7 +680,14 @@ class DatabaseMappingBase:
             sqlalchemy.sql.expression.Alias
         """
         if self._parameter_value_list_sq is None:
-            self._parameter_value_list_sq = self._subquery("parameter_value_list")
+            param_val_lst_sq = self._subquery("parameter_value_list")
+            self._parameter_value_list_sq = self.query(
+                param_val_lst_sq.c.id.concat(",").concat(param_val_lst_sq.c.value_index).label("id"),
+                param_val_lst_sq.c.name,
+                param_val_lst_sq.c.value_index,
+                param_val_lst_sq.c.value,
+                param_val_lst_sq.c.commit_id,
+            ).subquery()
         return self._parameter_value_list_sq
 
     @property
@@ -1738,22 +1744,8 @@ class DatabaseMappingBase:
             }
         cache = {
             tablename: {x.id: x for x in self.query(getattr(self, self.cache_sqs[tablename]))}
-            for tablename in tablenames & self.cache_sqs.keys() - {"parameter_value_list"}
+            for tablename in tablenames & self.cache_sqs.keys()
         }
-        if "parameter_value_list" in tablenames:
-            ValueList = namedtuple("ValueList", ["id", "name", "value_list", "commit_id"])
-            value_lists = dict()
-            reduced = dict()
-            for x in self.query(getattr(self, self.cache_sqs["parameter_value_list"])):
-                values = value_lists.setdefault(x.id, [])
-                if x.value_index >= len(values):
-                    values += (x.value_index + 1 - len(values)) * [None]
-                values[x.value_index] = x.value
-                reduced[x.id] = ValueList(x.id, x.name, [], x.commit_id)
-            for id_, value_list in value_lists.items():
-                reduced_value_list = reduced[id_].value_list
-                reduced_value_list += value_list
-            cache["parameter_value_list"] = reduced
         return cache
 
     @staticmethod
