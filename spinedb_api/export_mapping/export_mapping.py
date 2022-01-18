@@ -17,7 +17,7 @@ Contains export mappings for database items such as entities, entity classes and
 
 from dataclasses import dataclass
 from itertools import cycle, dropwhile, islice
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.sql.expression import literal
 from ..parameter_value import (
     from_database_to_single_value,
@@ -791,14 +791,14 @@ class RelationshipClassObjectHighlightingMapping(RelationshipClassMapping):
         return query.add_columns(db_map.object_class_sq.c.id.label("object_class_id"))
 
     def filter_query(self, db_map, query):
-        highlighted_object_class_sq = (
-            db_map.query(db_map.relationship_class_sq)
-            .filter(db_map.relationship_class_sq.c.dimension == self.highlight_dimension)
-            .subquery()
+        highlighted_object_class_qry = db_map.query(db_map.relationship_class_sq).filter(
+            db_map.relationship_class_sq.c.dimension == self.highlight_dimension
         )
-        return query.outerjoin(
-            highlighted_object_class_sq, db_map.wide_relationship_class_sq.c.id == highlighted_object_class_sq.c.id
-        ).filter(highlighted_object_class_sq.c.object_class_id == db_map.object_class_sq.c.id)
+        conditions = (
+            and_(db_map.wide_relationship_class_sq.c.id == x.id, db_map.object_class_sq.c.id == x.object_class_id)
+            for x in highlighted_object_class_qry
+        )
+        return query.filter(or_(*conditions))
 
     @staticmethod
     def id_field():
@@ -887,19 +887,21 @@ class RelationshipObjectHighlightingMapping(RelationshipMapping):
     """
 
     MAP_TYPE = "RelationshipObjectHighlightingMapping"
+    highlight_dimension = 0
 
     def add_query_columns(self, db_map, query):
         query = super().add_query_columns(db_map, query)
-        return query.add_columns(db_map.ext_relationship_sq.c.object_id)
+        return query.add_columns(db_map.object_sq.c.id.label("object_id"))
 
     def filter_query(self, db_map, query):
-        return query.outerjoin(
-            db_map.ext_relationship_sq,
-            and_(
-                db_map.ext_relationship_sq.c.id == db_map.wide_relationship_sq.c.id,
-                db_map.ext_relationship_sq.c.object_class_id == db_map.object_class_sq.c.id,
-            ),
+        highlighted_object_qry = db_map.query(db_map.relationship_sq).filter(
+            db_map.relationship_sq.c.dimension == self.highlight_dimension
         )
+        conditions = (
+            and_(db_map.wide_relationship_sq.c.id == x.id, db_map.object_sq.c.id == x.object_id)
+            for x in highlighted_object_qry
+        )
+        return query.filter(or_(*conditions))
 
     @staticmethod
     def is_buddy(parent):
