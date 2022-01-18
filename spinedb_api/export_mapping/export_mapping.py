@@ -582,6 +582,14 @@ class ExportMapping(Mapping):
         first_row = qry.first()
         return self.make_header_recursive(first_row, title_state, buddies)
 
+    def dimension_index(self):
+        """Returns mapping's dimensional index, usually relationship dimension.
+
+        Returns:
+            int: relationship dimension or -1 if mapping is not object/object class mapping
+        """
+        return -1
+
 
 def drop_non_positioned_tail(root_mapping):
     """Makes a modified mapping hierarchy without hidden tail mappings.
@@ -766,8 +774,35 @@ class RelationshipClassMapping(ExportMapping):
         state["object_class_id_list"] = getattr(db_row, "object_class_id_list")
         return state
 
-    def index(self):
-        return -1
+
+class RelationshipClassObjectHighlightingMapping(RelationshipClassMapping):
+    """Maps relationships classes.
+
+    Adds object class dimension chosen by highlight_dimension to the query.
+
+    Can be used as the topmost mapping.
+    """
+
+    MAP_TYPE = "RelationshipClassObjectHighlightingMapping"
+    highlight_dimension = 0
+
+    def add_query_columns(self, db_map, query):
+        query = super().add_query_columns(db_map, query)
+        return query.add_columns(db_map.object_class_sq.c.id.label("object_class_id"))
+
+    def filter_query(self, db_map, query):
+        highlighted_object_class_sq = (
+            db_map.query(db_map.relationship_class_sq)
+            .filter(db_map.relationship_class_sq.c.dimension == self.highlight_dimension)
+            .subquery()
+        )
+        return query.outerjoin(
+            highlighted_object_class_sq, db_map.wide_relationship_class_sq.c.id == highlighted_object_class_sq.c.id
+        ).filter(highlighted_object_class_sq.c.object_class_id == db_map.object_class_sq.c.id)
+
+    @staticmethod
+    def id_field():
+        return "relationship_class_id"
 
 
 class RelationshipClassObjectClassMapping(ExportMapping):
@@ -788,14 +823,14 @@ class RelationshipClassObjectClassMapping(ExportMapping):
 
     def _data(self, db_row):
         data = super()._data(db_row).split(",")
-        index = self.index()
+        index = self.dimension_index()
         try:
             return data[index]
         except IndexError:
             return ""
 
-    def index(self):
-        return self.parent.index() + 1
+    def dimension_index(self):
+        return self.parent.dimension_index() + 1
 
     @staticmethod
     def is_buddy(parent):
@@ -841,8 +876,34 @@ class RelationshipMapping(ExportMapping):
     def is_buddy(parent):
         return isinstance(parent, RelationshipClassMapping)
 
-    def index(self):
-        return -1
+
+class RelationshipObjectHighlightingMapping(RelationshipMapping):
+    """Maps relationships.
+
+    Adds object dimension chosen by highlight_dimension in relationship class mapping to the query.
+
+    Cannot be used as the topmost mapping;
+    one of the parents must be :class:`RelationshipClassObjectHighlightingMapping`.
+    """
+
+    MAP_TYPE = "RelationshipObjectHighlightingMapping"
+
+    def add_query_columns(self, db_map, query):
+        query = super().add_query_columns(db_map, query)
+        return query.add_columns(db_map.ext_relationship_sq.c.object_id)
+
+    def filter_query(self, db_map, query):
+        return query.outerjoin(
+            db_map.ext_relationship_sq,
+            and_(
+                db_map.ext_relationship_sq.c.id == db_map.wide_relationship_sq.c.id,
+                db_map.ext_relationship_sq.c.object_class_id == db_map.object_class_sq.c.id,
+            ),
+        )
+
+    @staticmethod
+    def is_buddy(parent):
+        return isinstance(parent, RelationshipClassObjectHighlightingMapping)
 
 
 class RelationshipObjectMapping(ExportMapping):
@@ -864,14 +925,14 @@ class RelationshipObjectMapping(ExportMapping):
 
     def _data(self, db_row):
         data = super()._data(db_row).split(",")
-        index = self.index()
+        index = self.dimension_index()
         try:
             return data[index]
         except IndexError:
             return ""
 
-    def index(self):
-        return self.parent.index() + 1
+    def dimension_index(self):
+        return self.parent.dimension_index() + 1
 
     @staticmethod
     def is_buddy(parent):
@@ -893,18 +954,18 @@ class ParameterDefinitionMapping(ExportMapping):
         )
 
     def filter_query(self, db_map, query):
-        if "object_class_id" in {c["name"] for c in query.column_descriptions}:
+        column_names = {c["name"] for c in query.column_descriptions}
+        if "object_class_id" in column_names:
             return query.outerjoin(
                 db_map.parameter_definition_sq,
                 db_map.parameter_definition_sq.c.object_class_id == db_map.object_class_sq.c.id,
             )
-        if "relationship_class_id" in {c["name"] for c in query.column_descriptions}:
+        if "relationship_class_id" in column_names:
             return query.outerjoin(
                 db_map.parameter_definition_sq,
                 db_map.parameter_definition_sq.c.relationship_class_id == db_map.wide_relationship_class_sq.c.id,
             )
-        # We should never end up here
-        return query
+        raise RuntimeError("Logic error: this code should be unreachable.")
 
     @staticmethod
     def name_field():
@@ -1076,7 +1137,8 @@ class ParameterValueMapping(ExportMapping):
     def filter_query(self, db_map, query):
         if not self._selects_value:
             return query
-        if "object_id" in {c["name"] for c in query.column_descriptions}:
+        column_names = {c["name"] for c in query.column_descriptions}
+        if "object_id" in column_names:
             return query.outerjoin(
                 db_map.parameter_value_sq,
                 and_(
@@ -1084,7 +1146,7 @@ class ParameterValueMapping(ExportMapping):
                     db_map.parameter_value_sq.c.parameter_definition_id == db_map.parameter_definition_sq.c.id,
                 ),
             )
-        if "relationship_id" in {c["name"] for c in query.column_descriptions}:
+        if "relationship_id" in column_names:
             return query.outerjoin(
                 db_map.parameter_value_sq,
                 and_(
@@ -1092,8 +1154,7 @@ class ParameterValueMapping(ExportMapping):
                     db_map.parameter_value_sq.c.parameter_definition_id == db_map.parameter_definition_sq.c.id,
                 ),
             )
-        # We should never end up here
-        return query
+        raise RuntimeError("Logic error: this code should be unreachable.")
 
     @staticmethod
     def name_field():
