@@ -298,10 +298,10 @@ class _MappedTable(dict):
         value = tuple(tuple(x) if isinstance(x, list) else x for x in value)
 
         def _get_id():
-            d = self._id_by_unique_key_value
+            id_ = self._id_by_unique_key_value
             for k, v in zip(key, value):
-                d = d.get(k, {}).get(v, {})
-            return d.get("id")
+                id_ = id_.get(k, {}).get(v, {})
+            return id_
 
         id_ = _get_id()
         if not id_ and fetch:
@@ -357,6 +357,13 @@ class _MappedTable(dict):
             if current_item:
                 return current_item
 
+    def find_items(self, **kwargs):
+        d = self._id_by_unique_key_value
+        for key in list(kwargs):
+            if key in d:
+                d = d[key]
+                del kwargs[key]
+
     def check_item(self, item, for_update=False, skip_keys=()):
         # FIXME: The only use-case for skip_keys at the moment is that of importing scenario alternatives,
         # where we only want to match by (scen_name, alt_name) and not by (scen_name, rank)
@@ -397,9 +404,9 @@ class _MappedTable(dict):
     def _add_unique(self, item):
         for key, value in item.unique_values():
             d = self._id_by_unique_key_value
-            for k, v in zip(key, value):
+            for k, v in zip(key[:-1], value[:-1]):
                 d = d.setdefault(k, {}).setdefault(v, {})
-            d["id"] = item["id"]
+            d.setdefault(key[-1], {})[value[-1]] = item["id"]
         # For example, after treating the following items
         # entity{"id": 1, "class_name": "cat", "name": "Felix"}
         # entity{"id": 2, "class_name": "cat", "name": "Tom"}
@@ -408,21 +415,33 @@ class _MappedTable(dict):
         # assert self._id_by_unique_key_value == {
         #    "class_name": {
         #        "cat": {
-        #            "name": {"Felix": {"id": 1}, "Tom": {"id": 2}},
-        #            "byname": {("Felix",): {"id": 1}, ("Tom",): {"id": 2}},
+        #            "name": {"Felix": 1, "Tom": 2},
+        #            "byname": {("Felix",): 1, ("Tom",): 2},
         #        },
         #        "dog": {
-        #            "name": {"Scooby": {"id": 3}, "Pluto": {"id": 4}},
-        #            "byname": {("Scooby",): {"id": 3}, ("Pluto",): {"id": 4}},
+        #            "name": {"Scooby": 3, "Pluto": 4},
+        #            "byname": {("Scooby",): 3, ("Pluto",): 4},
         #        },
         #    }
         # }
 
     def _remove_unique(self, item):
         for key, value in item.unique_values():
-            id_by_value = self._id_by_unique_key_value.get(key, {})
-            if id_by_value.get(value) == item["id"]:
-                del id_by_value[value]
+            d = self._id_by_unique_key_value
+            for k, v in zip(key[:-1], value[:-1]):
+                d = d.get(k, {}).get(v, {})
+            d = d.get(key[-1], {})
+            if d.get(value[-1]) == item["id"]:
+                del d[value]
+
+    def _is_unique(self, item):
+        for key, value in item.unique_values():
+            id_ = self._id_by_unique_key_value
+            for k, v in zip(key, value):
+                id_ = id_.get(k, {}).get(v, {})
+            if id_:
+                return False
+        return True
 
     def add_item(self, item, new=False):
         if not isinstance(item, MappedItemBase):
@@ -434,7 +453,7 @@ class _MappedTable(dict):
             if id_ in self or id_ in self._temp_id_by_db_id:
                 # The item is already in the mapping
                 return
-            if any(value in self._id_by_unique_key_value.get(key, {}) for key, value in item.unique_values()):
+            if not self._is_unique(item):
                 # An item with the same unique key is already in the mapping
                 return
         else:
